@@ -508,6 +508,8 @@ export async function checkToolPermission(
 
 Long conversations inevitably hit token limits. Claude Code employs a **progressive compression strategy** composed of multiple tiers:
 
+> **Example scope:** The fixed-window strategy below is a teaching example for text-only messages, not a production Snip implementation. Conversations with tools must preserve complete tool-call/result groups at the cut boundary.
+
 ```typescript
 // contextManager.ts
 export interface CompressionStrategy {
@@ -516,14 +518,14 @@ export interface CompressionStrategy {
   compress: (messages: Message[]) => Promise<Message[]>
 }
 
-// Strategy 1: History snipping (cheapest)
+// Teaching example: retain system messages and a recent text-message window
 const snipStrategy: CompressionStrategy = {
   name: 'snip',
   shouldTrigger: (count, limit) => count > limit * 0.7,
   async compress(messages) {
     // Keep system messages and the most recent N messages
     const systemMsgs = messages.filter(m => m.role === 'system')
-    const recentMsgs = messages.slice(-20)
+    const recentMsgs = messages.filter(m => m.role !== 'system').slice(-20)
     return [...systemMsgs, ...recentMsgs]
   },
 }
@@ -586,7 +588,7 @@ export class ContextManager {
 +----------+----------+-----------+---------------------------+
 ```
 
-Key insight: **Information loss is relative.** Snip discards complete tool results but preserves conversation structure. Summary compression preserves semantic information but loses original phrasing. Which strategy to choose depends on what information matters most in the conversation -- if the user is debugging a complex bug, tool results (such as log output) may be the least expendable; if the user is performing a code refactoring, the overall design decisions matter more than intermediate steps.
+Key insight: **Information loss is relative.** Message-level Snip discards historical messages; MicroCompact replaces tool-result bodies while retaining their message structure. Summary compression preserves semantic information but loses original phrasing. Which strategy to choose depends on what information matters most in the conversation -- if the user is debugging a complex bug, tool results (such as log output) may be the least expendable; if the user is performing a code refactoring, the overall design decisions matter more than intermediate steps.
 
 > **Cross-reference:** Claude Code's four-tier compression strategy is fully analyzed in Chapter 7, "Context Management -- Agent Working Memory." The two-tier strategy in this chapter is a simplified version.
 
@@ -837,10 +839,10 @@ The circuit breaker implementation is particularly elegant. In the source code, 
 stateDiagram-v2
     [*] --> Closed : Normal operation
 
-    Closed --> Closed : Operation succeeded\nReset consecutiveFailures
+    Closed --> Closed : Operation succeeded<br/>Reset consecutiveFailures
     Closed --> Open : Consecutive failures >= 3
 
-    Open --> Fallback : Switch to fallback model\nClean state and retry
+    Open --> Fallback : Switch to fallback model<br/>Clean state and retry
 
     state Open {
         [*] --> ExitLoop
@@ -849,11 +851,11 @@ stateDiagram-v2
 
     state Fallback {
         [*] --> DegradedExecution
-        DegradedExecution : Ensure system remains usable\nduring partial failure
+        DegradedExecution : Ensure system remains usable<br/>during partial failure
     }
 
-    note right of Closed : Normal state\nconsecutiveFailures = 0
-    note right of Open : Failed state\nconsecutiveFailures >= 3\nLikely a systemic issue
+    note right of Closed : Normal state<br/>consecutiveFailures = 0
+    note right of Open : Failed state<br/>consecutiveFailures >= 3<br/>Likely a systemic issue
 ```
 
 **Design dimensions for the circuit breaker pattern:** When implementing a circuit breaker, the following parameters need to be decided:

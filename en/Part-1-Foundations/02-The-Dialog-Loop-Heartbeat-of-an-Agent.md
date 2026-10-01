@@ -31,7 +31,7 @@ flowchart TD
     note1["UI renders each event immediately; user does not need to wait for completion"]
 
     subgraph layer2["Layer 2: Cancellability"]
-        cancel["Caller can invoke generator.return() at any time to terminate"]
+        cancel["AbortSignal requests cancellation; return() requests closure"]
         clean["Triggers finally block for resource cleanup"]
         scene2["Corresponding scenario: user presses Ctrl+C to interrupt"]
         cancel --> clean --> scene2
@@ -60,7 +60,7 @@ This function signature encapsulates three layers of design decisions:
 
 1. **Union of Yielded Types**: The generator can yield five types of events -- streaming token arrival events, API request start events, user/assistant/system messages, tombstone messages that mark deprecated messages, and tool call summary messages. These five event types cover all information that needs to be communicated to the UI layer during the dialog process. Using a union type rather than multiple independent generators ensures temporal consistency of events -- the order of events seen by the UI is exactly the same as the order they were produced.
 
-2. **Terminal Return Type**: The generator ultimately returns a terminal state object indicating the reason the dialog ended. The caller consumes the event stream via `for await (... of query(...))`, and when the loop ends naturally, the generator's `return` value is the termination reason. This "yield process, return conclusion" pattern allows upper-layer code to cleanly separate "in-process handling" from "post-completion cleanup."
+2. **Terminal return type**: The generator returns a terminal state, but `for await...of` consumes only yielded values and discards the final return value. To obtain it, explicitly call `await iterator.next()` until `done` is true and read that result’s `value`, or capture a delegated generator’s return with `yield*`. Do not assume the loop variable contains the terminal state.
 
 3. **Parameter Object**: All input parameters are encapsulated in a single structured object rather than positional parameters, allowing the caller to provide fields as needed. Key fields include message history, system prompt, permission check function, tool execution context, maximum loop count, and so on.
 
@@ -187,7 +187,7 @@ Before calling the model, the loop executes a series of preprocessing steps. The
 
 1. **Tool Result Budget**: Truncates or persists overly large tool results to disk, ensuring the context window limit is not exceeded. This is similar to the "paging" mechanism in computer science -- when data is too large to fit entirely in memory (the context window), some data is stored to disk, retaining only a summary or reference.
 
-2. **Snip Compression**: If history trimming is enabled, overly long history messages are trimmed. Snip is the most "brutal" compression method -- it directly truncates message content. It is typically used to handle excessively long output from tools (such as the complete contents of large files).
+2. **Snip compression**: When history trimming is enabled, the system trims the message sequence and passes the returned messages and freed-token count downstream. This is distinct from truncating a single oversized tool result or replacing its body during MicroCompact.
 
 3. **Microcompact**: Performs lightweight compression before auto-compaction, using cached editing techniques to reduce token consumption. The elegance of Microcompact lies in being "cache-friendly" -- it tries to reuse tokens already cached on the API side, avoiding complete cache invalidation caused by compression.
 
@@ -199,7 +199,7 @@ Before calling the model, the loop executes a series of preprocessing steps. The
 
 7. **Token Block Check**: If the token count exceeds a hard limit, an error message is returned directly without making an API call. This is a "fail fast" mechanism -- rather than sending an API request doomed to fail, it's better to block it locally.
 
-> **Best Practice:** The design of this seven-step pipeline follows an important principle: **compression methods are arranged from lightweight to heavyweight, and each step tries the lowest-cost approach first.** This principle is worth following when building your own Agent system -- first use Snip to trim overly long content, then use Microcompact to reduce cache waste, then use Context Collapse to fold redundant information, and only finally use Autocompact for a full summary. Because each step loses some information, you should delay using the most "aggressive" compression methods as long as possible.
+> **Best Practice:** The design of this seven-step pipeline follows an important principle: **compression methods are arranged from lightweight to heavyweight, and each step tries the lowest-cost approach first.** This principle is worth following when building your own Agent system -- first use Snip to trim the historical message sequence, then use Microcompact to reduce cache waste, then use Context Collapse to fold redundant information, and only finally use Autocompact for a full summary. Because each step loses some information, you should delay using the most "aggressive" compression methods as long as possible.
 
 ### Phase 3: API Call
 
@@ -313,7 +313,7 @@ Claude Code's dialog loop chooses `async function*` over a class, and this choic
 
 2. **Generator Backpressure Semantics**: `yield` pauses execution until the consumer requests the next value. This means if the UI layer can't keep up with the production speed, the generator automatically pauses without accumulating memory. This is a concern production systems must address -- when tool execution produces large amounts of output (such as the full `npm install` log), a system without backpressure control could crash from memory accumulation.
 
-3. **Cancellation Propagation**: JavaScript generators have a `.return()` method; calling it triggers the generator's finally block and cleans up resources. Combined with resource management declarations, cleanup logic becomes deterministic. This means when the user presses Ctrl+C, not only can the dialog loop be stopped, but all executing tools are properly cancelled and all temporary resources are cleaned up.
+3. **Cancellation propagation**: `.return()` requests generator closure and runs applicable `finally` blocks, but cannot interrupt a pending `await` or cancel external I/O on its own. Cancellation requires an `AbortController` and operations that observe its signal; resource cleanup remains the responsibility of explicit cleanup paths.
 
 4. **Composability**: The `yield*` delegation syntax allows sub-generator output to be forwarded directly. The main loop's results are passed to the outer generator through delegation syntax, and tool execution is chained through the same mechanism. This "generator chain" pattern allows code at different levels to compose seamlessly -- the dialog loop produces events, tool execution also produces events, and the upper-level UI only needs a single unified `for await...of` loop to consume events from all levels.
 
@@ -422,7 +422,7 @@ Reflection: If the model calling function were hard-coded directly in the loop, 
 **Exercise 4: Context Compression Pipeline in Practice**
 
 Send Claude Code a series of requests that require substantial context (such as "read this large file, then generate documentation based on it, then run tests"), and observe how the compression pipeline is triggered. Note the following clues:
-- When Snip compression is triggered (sign that tool results are being truncated)
+- When Snip compression is triggered (message-level history trimming)
 - When Autocompact is triggered (sign that conversation history is being summarized)
 - Whether the model's reasoning ability is affected after compression
 
